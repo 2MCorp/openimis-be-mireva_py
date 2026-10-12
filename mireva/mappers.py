@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import zlib
 from datetime import timedelta
 from typing import Any
 
@@ -9,15 +10,22 @@ from django.db.models import Avg, Count, Q
 from django.utils import timezone
 
 from claim.models import Claim
+from insuree.models import InsureeStatus
 
-from mireva.models import OmopConceptMapping
+from mireva.models import MirevaClaimResult, OmopConceptMapping
 
 
 class OpenIMISToMirevaMapper:
     """Converts openIMIS claim data and aggregates into MIREVA inputs."""
 
+    LOCAL_CONCEPT_BASE = 2_000_000_000
+    LOCAL_CONCEPT_SPAN = 100_000_000
     VISIT_TYPE_MAP = {"O": 9202, "I": 9201, "E": 9203}
+    VISIT_TYPE_LABELS = {"O": "outpatient", "I": "inpatient", "E": "emergency"}
     GENDER_MAP = {"M": 8507, "F": 8532}
+
+    def __init__(self) -> None:
+        self._mapping_cache: dict[str, dict[str, int]] = {}
 
     def map_claim(
         self,
@@ -49,12 +57,13 @@ class OpenIMISToMirevaMapper:
                 "service"
             )
         ]
-        return {
+        policy_start_date, policy_end_date = self._policy_period(claim)
+        payload = {
             "claim_id": str(claim.uuid),
             "visit": {
                 "visit_concept_id": self.VISIT_TYPE_MAP.get(claim.visit_type, 9202),
                 "visit_start_date": claim.date_from.isoformat(),
-                "visit_type": claim.visit_type,
+                "visit_type": self.VISIT_TYPE_LABELS.get(claim.visit_type, "outpatient"),
             },
             "patient": {
                 "patient_id": str(insuree.uuid),
@@ -68,6 +77,38 @@ class OpenIMISToMirevaMapper:
             "patient_history": patient_history,
             "provider_history": provider_history or {},
         }
+        deceased_date = self._deceased_date(insuree)
+        if deceased_date:
+            payload["patient_deceased_date"] = deceased_date.isoformat()
+        if policy_start_date:
+            payload["policy_start_date"] = policy_start_date.isoformat()
+        if policy_end_date:
+            payload["policy_end_date"] = policy_end_date.isoformat()
+        if claim.date_claimed:
+            payload["submission_date"] = claim.date_claimed.isoformat()
+        health_facility_uuid = getattr(claim.health_facility, "uuid", None)
+        if health_facility_uuid:
+            payload["provider_id"] = str(health_facility_uuid)
+        return payload
+
+    @staticmethod
+    def _deceased_date(insuree: Any) -> Any:
+        """Return the insuree's status date when their status is DEAD, else None."""
+        if getattr(insuree, "status", None) != InsureeStatus.DEAD:
+            return None
+        return getattr(insuree, "status_date", None)
+
+    @staticmethod
+    def _policy_period(claim: Claim) -> tuple[Any, Any]:
+        """Return the earliest start and latest expiry of policies covering the claim lines."""
+        policies = [
+            line.policy
+            for line in [*claim.items.all(), *claim.services.all()]
+            if getattr(line, "policy", None) is not None
+        ]
+        starts = [p.effective_date or p.start_date for p in policies if p.start_date]
+        ends = [p.expiry_date for p in policies if p.expiry_date]
+        return (min(starts) if starts else None, max(ends) if ends else None)
 
     def fetch_patient_history(
         self, insuree_id: int, exclude_claim_id: int, limit: int = 10
@@ -85,13 +126,21 @@ class OpenIMISToMirevaMapper:
             )
             .exclude(id=exclude_claim_id)
             .select_related("insuree", "health_facility")
-            .prefetch_related("items__item", "services__service")
+            .prefetch_related(
+                "items__item", "items__policy", "services__service", "services__policy"
+            )
             .order_by("-date_from")[:limit]
         )
         return [self.map_claim(history_claim, [], None) for history_claim in claims]
 
-    def fetch_provider_history(self, hf_id: int) -> dict[str, Any]:
-        """Aggregate provider-level claim metrics used for model context."""
+    def fetch_provider_history(
+        self, hf_id: int, exclude_claim_id: int | None = None
+    ) -> dict[str, Any]:
+        """Aggregate provider-level claim metrics used for model context.
+
+        The claim being scored is excluded, and rejections that MIREVA itself
+        issued are not counted, so the model never learns from its own output.
+        """
         now = timezone.now().date()
         last_30_days_start = now - timedelta(days=30)
 
@@ -99,13 +148,19 @@ class OpenIMISToMirevaMapper:
             health_facility_id=hf_id,
             validity_to__isnull=True,
         )
+        if exclude_claim_id is not None:
+            base_queryset = base_queryset.exclude(id=exclude_claim_id)
         aggregate_result = base_queryset.aggregate(
             total_claims=Count("id"),
             avg_claim_amount=Avg("claimed"),
             claims_last_30_days=Count(
                 "id", filter=Q(date_from__gte=last_30_days_start)
             ),
-            rejected_claims=Count("id", filter=Q(status=Claim.STATUS_REJECTED)),
+            rejected_claims=Count(
+                "id",
+                filter=Q(status=Claim.STATUS_REJECTED)
+                & ~Q(mireva_result__decision=MirevaClaimResult.DECISION_REJECT),
+            ),
         )
         total_claims = int(aggregate_result["total_claims"] or 0)
         rejected_claims = int(aggregate_result["rejected_claims"] or 0)
@@ -121,40 +176,54 @@ class OpenIMISToMirevaMapper:
         }
 
     def _icd_to_omop(self, icd_code: str) -> int:
-        """Resolve ICD-10 source code to OMOP concept id, defaulting to 0."""
-        return (
-            OmopConceptMapping.objects.filter(
-                source_code=icd_code,
-                source_vocabulary=OmopConceptMapping.VOCABULARY_ICD10,
-            )
-            .values_list("concept_id", flat=True)
-            .first()
-            or 0
-        )
+        """Resolve an ICD-10 source code to an OMOP concept id."""
+        return self.concept_id(OmopConceptMapping.VOCABULARY_ICD10, icd_code)
 
     def _item_to_omop(self, item_code: str) -> int:
-        """Resolve openIMIS item code to OMOP concept id, defaulting to 0."""
-        return (
-            OmopConceptMapping.objects.filter(
-                source_code=item_code,
-                source_vocabulary=OmopConceptMapping.VOCABULARY_ITEM,
-            )
-            .values_list("concept_id", flat=True)
-            .first()
-            or 0
-        )
+        """Resolve an openIMIS item code to an OMOP concept id."""
+        return self.concept_id(OmopConceptMapping.VOCABULARY_ITEM, item_code)
 
     def _service_to_omop(self, service_code: str) -> int:
-        """Resolve openIMIS service code to OMOP concept id, defaulting to 0."""
-        return (
-            OmopConceptMapping.objects.filter(
-                source_code=service_code,
-                source_vocabulary=OmopConceptMapping.VOCABULARY_SERVICE,
-            )
-            .values_list("concept_id", flat=True)
-            .first()
-            or 0
-        )
+        """Resolve an openIMIS service code to an OMOP concept id."""
+        return self.concept_id(OmopConceptMapping.VOCABULARY_SERVICE, service_code)
+
+    def concept_id(self, vocabulary: str, source_code: str) -> int:
+        """Return the mapped OMOP concept id, else a stable site-specific id.
+
+        A shared fallback of 0 would make every unmapped code look identical, which
+        corrupts frequency rules and the model vocabulary. OMOP reserves ids from
+        2,000,000,000 for local concepts, so unmapped codes get a deterministic id
+        in that range until a real mapping is loaded.
+        """
+        code = self.normalize_code(vocabulary, source_code)
+        if not code:
+            return 0
+        return self._mappings(vocabulary).get(code) or self.local_concept_id(vocabulary, code)
+
+    @staticmethod
+    def normalize_code(vocabulary: str, source_code: Any) -> str:
+        """Canonical form of a source code (ICD-10 dots removed, upper-cased)."""
+        code = str(source_code or "").strip().upper()
+        if vocabulary == OmopConceptMapping.VOCABULARY_ICD10:
+            code = code.replace(".", "")
+        return code
+
+    @classmethod
+    def local_concept_id(cls, vocabulary: str, normalized_code: str) -> int:
+        """Deterministic site-specific concept id for a code without a mapping."""
+        digest = zlib.crc32(f"{vocabulary}:{normalized_code}".encode("utf-8"))
+        return cls.LOCAL_CONCEPT_BASE + digest % cls.LOCAL_CONCEPT_SPAN
+
+    def _mappings(self, vocabulary: str) -> dict[str, int]:
+        """Load one vocabulary's mappings once per mapper instance."""
+        if vocabulary not in self._mapping_cache:
+            self._mapping_cache[vocabulary] = {
+                self.normalize_code(vocabulary, code): concept_id
+                for code, concept_id in OmopConceptMapping.objects.filter(
+                    source_vocabulary=vocabulary
+                ).values_list("source_code", "concept_id")
+            }
+        return self._mapping_cache[vocabulary]
 
     @staticmethod
     def _to_float(value: Any) -> float:

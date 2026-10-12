@@ -8,5 +8,11 @@ dependencies = [
     "celery",
     "django",
     "graphene-django",
-    "mireva_sdk",
+    "mireva-sdk",
+    "openimis-be-claim",
+    "openimis-be-core",
+    "openimis-be-insuree",
 ]
+
+[tool.uv.sources]
+mireva-sdk = { path = "../../mireva_sdk", editable = true }

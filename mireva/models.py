@@ -51,6 +51,45 @@ class MirevaClaimResult(models.Model):
         db_table = "mireva_claim_result"
 
 
+class MirevaEvaluation(models.Model):
+    """Immutable audit record of one MIREVA evaluation of a claim.
+
+    ``MirevaClaimResult`` holds only the latest result and is overwritten on
+    re-evaluation; this table keeps every evaluation with the exact request sent.
+    """
+
+    ACTION_APPROVED = "APPROVED"
+    ACTION_REVIEW_SELECTED = "REVIEW_SELECTED"
+    ACTION_REVIEW_DOWNGRADED = "REVIEW_DOWNGRADED"
+    ACTION_REJECTED = "REJECTED"
+    ACTION_CHOICES = (
+        (ACTION_APPROVED, _("Claim approved")),
+        (ACTION_REVIEW_SELECTED, _("Claim selected for review")),
+        (ACTION_REVIEW_DOWNGRADED, _("Model rejection sent to review")),
+        (ACTION_REJECTED, _("Claim rejected")),
+    )
+
+    claim = models.ForeignKey(
+        "claim.Claim", on_delete=models.CASCADE, related_name="mireva_evaluations"
+    )
+    decision = models.CharField(max_length=10, choices=MirevaClaimResult.DECISION_CHOICES)
+    action = models.CharField(max_length=20, choices=ACTION_CHOICES)
+    fraud_score = models.FloatField()
+    risk_level = models.CharField(max_length=10, choices=MirevaClaimResult.RISK_LEVEL_CHOICES)
+    confidence = models.FloatField()
+    reasons = models.JSONField(default=list)
+    flags = models.JSONField(default=list)
+    model_version = models.CharField(max_length=64)
+    payload_hash = models.CharField(max_length=64)
+    request_payload = models.JSONField(null=True, blank=True)
+    evaluated_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "mireva_evaluation"
+        ordering = ["-evaluated_at", "-id"]
+        indexes = [models.Index(fields=["claim", "-evaluated_at"])]
+
+
 class OmopConceptMapping(models.Model):
     """Maps source diagnosis/item/service codes to OMOP concept identifiers."""
 
