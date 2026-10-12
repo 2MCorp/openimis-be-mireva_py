@@ -23,11 +23,21 @@ def reviewer_rights() -> list[int]:
     return [int(right) for right in ClaimConfig.gql_mutation_update_claims_perms]
 
 
-def find_reviewers() -> list[Any]:
-    """Return active users whose valid, unblocked roles carry a reviewer right."""
+def district_scoping_enabled() -> bool:
+    """Whether reviewers are limited to the districts assigned to them (opt-in)."""
+    return bool(getattr(settings, "MIREVA_SCOPE_REVIEWERS_BY_DISTRICT", False))
+
+
+def find_reviewers(district_id: int | None = None) -> list[Any]:
+    """Return active users whose valid, unblocked roles carry a reviewer right.
+
+    With ``MIREVA_SCOPE_REVIEWERS_BY_DISTRICT`` and a known ``district_id``, a reviewer who has
+    district assignments is kept only if one of them is that district. A reviewer with no
+    assignments is unrestricted, which matches how openIMIS row security treats such users.
+    """
     from core.models import User
 
-    return list(
+    users = list(
         User.objects.filter(
             validity_to__isnull=True,
             i_user__validity_to__isnull=True,
@@ -38,10 +48,25 @@ def find_reviewers() -> list[Any]:
             i_user__user_roles__role__rights__right_id__in=reviewer_rights(),
         ).distinct()
     )
+    if district_id is None or not district_scoping_enabled():
+        return users
+
+    from location.models import UserDistrict
+
+    assigned: dict[int, set[int]] = {}
+    for user_id, location_id in UserDistrict.objects.filter(
+        validity_to__isnull=True, user_id__in=[u.i_user_id for u in users]
+    ).values_list("user_id", "location_id"):
+        assigned.setdefault(user_id, set()).add(location_id)
+    return [u for u in users if not assigned.get(u.i_user_id) or district_id in assigned[u.i_user_id]]
 
 
 def notify_reviewers(
-    claim_uuid: str, claim_code: str, prediction: dict[str, Any], downgraded: bool
+    claim_uuid: str,
+    claim_code: str,
+    prediction: dict[str, Any],
+    downgraded: bool,
+    district_id: int | None = None,
 ) -> int:
     """Send an in-app notification to every reviewer and return how many were created.
 
@@ -55,7 +80,7 @@ def notify_reviewers(
         return 0
 
     try:
-        reviewers = find_reviewers()
+        reviewers = find_reviewers(district_id)
         if not reviewers:
             logger.warning("No reviewers hold %s; MIREVA review of claim %s is unannounced",
                            reviewer_rights(), claim_uuid)
@@ -97,9 +122,13 @@ def notify_reviewers(
 
 
 def notify_reviewers_after_commit(
-    claim_uuid: str, claim_code: str, prediction: dict[str, Any], downgraded: bool
+    claim_uuid: str,
+    claim_code: str,
+    prediction: dict[str, Any],
+    downgraded: bool,
+    district_id: int | None = None,
 ) -> None:
     """Schedule the notification for after the surrounding transaction commits."""
     transaction.on_commit(
-        lambda: notify_reviewers(claim_uuid, claim_code, prediction, downgraded)
+        lambda: notify_reviewers(claim_uuid, claim_code, prediction, downgraded, district_id)
     )

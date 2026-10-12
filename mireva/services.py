@@ -225,7 +225,13 @@ class MirevaService:
         logger.info(
             "MIREVA review needed for claim %s, score=%s", claim.uuid, prediction.get("fraud_score")
         )
-        notify_reviewers_after_commit(str(claim.uuid), claim.code, prediction, downgraded)
+        notify_reviewers_after_commit(
+            str(claim.uuid),
+            claim.code,
+            prediction,
+            downgraded,
+            district_id=getattr(claim.health_facility, "location_id", None),
+        )
 
     @staticmethod
     def _to_dict(value: Any) -> dict[str, Any]:

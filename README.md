@@ -19,6 +19,7 @@ MIREVA_URL = "http://mireva-serve:8000"
 MIREVA_API_KEY = "your-api-key-here"
 MIREVA_MODEL_VERSION = "mireva-concord"  # optional; the SDK default is "mireva-origin"
 MIREVA_REVIEWER_RIGHTS = [111010]  # optional; rights whose holders are notified (default: the right needed to submit a review)
+MIREVA_SCOPE_REVIEWERS_BY_DISTRICT = False  # optional; True limits reviewers to their assigned districts
 MIREVA_STORE_PAYLOAD = True  # default; set False to keep only a hash of each request
 MIREVA_AUTO_REJECT = "hard_rules"  # default; "always" also auto-rejects model-only REJECTs
 ```
@@ -59,8 +60,9 @@ local range are rejected by the loader.
 - **Notifications:** when a claim goes to manual review (including a model-only `REJECT` that was
   downgraded), every active user whose unblocked role holds the reviewer right gets an in-app
   notification linking to the claim, with the risk level, score and top signals. It is sent after
-  the transaction commits, once per claim, and a failure never undoes the claim decision. Requires
-  the `notification` module; without it the review is only logged. Push over websocket needs a
+  the transaction commits, once per claim, and a failure never undoes the claim decision. With `MIREVA_SCOPE_REVIEWERS_BY_DISTRICT = True` a reviewer who has district assignments is only
+  notified for claims of those districts (reviewers without assignments are notified for all).
+  Requires the `notification` module; without it the review is only logged. Push over websocket needs a
   reachable channel layer (RabbitMQ), as configured for the notification module.
 - **Rejection reasons:** hard-rule rejections use openIMIS reason codes: visit outside the policy
   window is `21` (no coverage); amount, deceased patient, duplicate and gender/diagnosis rules are

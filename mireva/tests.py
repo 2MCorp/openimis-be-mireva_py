@@ -577,6 +577,30 @@ class ReviewerNotificationTests(TestCase):
         self.assertEqual(row.severity, "error")
         self.assertFalse(Notification.objects.filter(recipient=self.other).exists())
 
+    def test_district_scoping_is_opt_in_and_unassigned_reviewers_see_everything(self):
+        from location.models import Location, UserDistrict
+        from mireva.notifications import find_reviewers
+
+        districts = list(Location.objects.filter(type="D", validity_to__isnull=True)[:2])
+        if len(districts) < 2:
+            self.skipTest("needs two districts in the test database")
+        north, south = districts
+        UserDistrict.objects.create(user=self.reviewer.i_user, location=north, audit_user_id=-1)
+        self.addCleanup(UserDistrict.objects.filter(user=self.reviewer.i_user).delete)
+
+        def names(**kwargs):
+            return {u.username for u in find_reviewers(**kwargs)}
+
+        # Off by default: the district is ignored.
+        self.assertIn("mireva_rev", names(district_id=south.id))
+        with override_settings(MIREVA_SCOPE_REVIEWERS_BY_DISTRICT=True):
+            self.assertIn("mireva_rev", names(district_id=north.id))
+            self.assertNotIn("mireva_rev", names(district_id=south.id))
+            self.assertIn("mireva_rev", names())  # unknown district: nobody is dropped
+            # A reviewer with no assignments is unrestricted.
+            with override_settings(MIREVA_REVIEWER_RIGHTS=[111001]):
+                self.assertIn("mireva_oth", names(district_id=south.id))
+
     def test_notification_failure_never_raises(self):
         from mireva import notifications
 
