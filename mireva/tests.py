@@ -67,6 +67,61 @@ class MapperTests(SimpleTestCase):
         self.assertEqual(OpenIMISToMirevaMapper.VISIT_TYPE_LABELS["I"], "inpatient")
 
 
+class MapperContextTests(SimpleTestCase):
+    def test_prices_omit_unknown_values(self):
+        prices = OpenIMISToMirevaMapper._prices
+        self.assertEqual(prices(None, None), {})
+        self.assertEqual(prices(12, None), {"unit_price": 12.0})
+        self.assertEqual(prices(12, 10), {"unit_price": 12.0, "tariff_unit_price": 10.0})
+        self.assertEqual(prices(0, 0), {"unit_price": 0.0, "tariff_unit_price": 0.0})
+
+    def test_facility_licence_follows_status(self):
+        f = OpenIMISToMirevaMapper._facility_licensed
+        self.assertIs(f(SimpleNamespace(status="AC")), True)
+        self.assertIs(f(SimpleNamespace(status="IN")), False)
+        self.assertIs(f(SimpleNamespace(status="DE")), False)
+        self.assertIsNone(f(SimpleNamespace(status="ID")))
+        self.assertIsNone(f(None))
+
+    def test_tariff_prefers_pricelist_override_over_catalogue_price(self):
+        item = SimpleNamespace(item_id=1, item=SimpleNamespace(price=10))
+        other = SimpleNamespace(item_id=2, item=SimpleNamespace(price=20))
+        service = SimpleNamespace(service_id=7, service=SimpleNamespace(price=100))
+        claim = SimpleNamespace(
+            items=SimpleNamespace(
+                filter=lambda **k: SimpleNamespace(select_related=lambda *a: [item, other])
+            ),
+            services=SimpleNamespace(
+                filter=lambda **k: SimpleNamespace(select_related=lambda *a: [service])
+            ),
+            health_facility=SimpleNamespace(items_pricelist_id=5, services_pricelist_id=None),
+        )
+        fake = mock.MagicMock()
+        fake.ItemsPricelistDetail.objects.filter.return_value.values_list.return_value = [(1, 8)]
+        with mock.patch.dict("sys.modules", {"medical_pricelist.models": fake, "medical_pricelist": mock.MagicMock()}):
+            items, services = OpenIMISToMirevaMapper()._tariffs(claim)
+        self.assertEqual(items, {1: 8, 2: 20})
+        self.assertEqual(services, {7: 100})
+        fake.ServicesPricelistDetail.objects.filter.assert_not_called()
+
+
+class HistoryLimitTests(SimpleTestCase):
+    def _limit(self, value):
+        with mock.patch("mireva.services.MirevaClient"), override_settings(
+            MIREVA_URL="http://mireva.test", MIREVA_API_KEY="k", MIREVA_PATIENT_HISTORY_LIMIT=value
+        ):
+            return MirevaService().patient_history_limit
+
+    def test_default_and_override(self):
+        self.assertEqual(self._limit(None), 10)
+        self.assertEqual(self._limit(40), 40)
+
+    def test_out_of_range_is_refused(self):
+        for bad in (0, 51, "many"):
+            with self.assertRaises(ValueError):
+                self._limit(bad)
+
+
 class ServiceTests(SimpleTestCase):
     def _service(self):
         with mock.patch("mireva.services.MirevaClient"):

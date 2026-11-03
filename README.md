@@ -21,6 +21,7 @@ MIREVA_MODEL_VERSION = "mireva-concord"  # optional; the SDK default is "mireva-
 MIREVA_REVIEWER_RIGHTS = [111010]  # optional; rights whose holders are notified (default: the right needed to submit a review)
 MIREVA_SCOPE_REVIEWERS_BY_DISTRICT = False  # optional; True limits reviewers to their assigned districts
 MIREVA_STORE_PAYLOAD = True  # default; set False to keep only a hash of each request
+MIREVA_PATIENT_HISTORY_LIMIT = 10  # optional, 1-50; prior claims sent per request (volume rules only see these)
 MIREVA_AUTO_REJECT = "hard_rules"  # default; "always" also auto-rejects model-only REJECTs
 ```
 
@@ -33,6 +34,19 @@ MIREVA_AUTO_REJECT = "hard_rules"  # default; "always" also auto-rejects model-o
    `APPROVE` marks the claim processed. `REVIEW` selects it for manual review. `REJECT` rejects the
    claim automatically only when a hard rule fired; a model-only `REJECT` is sent to review (set
    `MIREVA_AUTO_REJECT = "always"` to restore automatic rejection).
+
+## Context sent to MIREVA
+
+Beyond codes and amounts, each payload carries what MIREVA's tariff, volume and facility rules need:
+
+- Per drug and procedure line: quantity, `unit_price` (price asked) and `tariff_unit_price`. The tariff is the
+  facility's price-list override (`medical_pricelist`) when there is one, else the catalogue price. History claims
+  are sent without tariffs.
+- `facility.level` and `facility.care_type` from the health facility, and `patient.poverty` from the insuree's family.
+- `provider_license_valid`: openIMIS has no licence field, so this is derived from facility status (`AC` true,
+  `IN` or `DE` false, otherwise omitted). A hard rule on it (enabled in MIREVA's extended registry) rejects claims
+  from inactive or delisted facilities, so check that matches your policy before enabling it.
+- Not sent: allergies (openIMIS has no source for them) and item/patient category.
 
 ## OMOP code mapping
 

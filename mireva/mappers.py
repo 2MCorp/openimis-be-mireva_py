@@ -32,9 +32,15 @@ class OpenIMISToMirevaMapper:
         claim: Claim,
         patient_history: list[dict[str, Any]],
         provider_history: dict[str, Any] | None,
+        with_tariffs: bool = True,
     ) -> dict[str, Any]:
-        """Map a claim to MIREVA's OMOP-normalized request payload."""
+        """Map a claim to MIREVA's OMOP-normalized request payload.
+
+        ``with_tariffs=False`` skips the price-list lookups; history claims use it because
+        MIREVA only compares the scored claim's prices with the tariff.
+        """
         insuree = claim.insuree
+        item_tariffs, service_tariffs = self._tariffs(claim) if with_tariffs else ({}, {})
         diagnoses = [
             {
                 "concept_id": self._icd_to_omop(self._diagnosis_to_code(code)),
@@ -48,11 +54,16 @@ class OpenIMISToMirevaMapper:
                 "concept_id": self._item_to_omop(item.item.code),
                 "quantity": self._to_float(item.qty_provided),
                 "days_supply": 0,
+                **self._prices(item.price_asked, item_tariffs.get(item.item_id)),
             }
             for item in claim.items.filter(validity_to__isnull=True).select_related("item")
         ]
         procedures = [
-            {"concept_id": self._service_to_omop(service.service.code)}
+            {
+                "concept_id": self._service_to_omop(service.service.code),
+                "quantity": self._to_float(service.qty_provided) or 1.0,
+                **self._prices(service.price_asked, service_tariffs.get(service.service_id)),
+            }
             for service in claim.services.filter(validity_to__isnull=True).select_related(
                 "service"
             )
@@ -69,6 +80,7 @@ class OpenIMISToMirevaMapper:
                 "patient_id": str(insuree.uuid),
                 "age": int(self._resolve_callable(insuree.age) or 0),
                 "gender_concept_id": self.GENDER_MAP.get(insuree.gender, 0),
+                "poverty": getattr(getattr(insuree, "family", None), "poverty", None),
             },
             "diagnoses": diagnoses,
             "drugs": drugs,
@@ -89,7 +101,69 @@ class OpenIMISToMirevaMapper:
         health_facility_uuid = getattr(claim.health_facility, "uuid", None)
         if health_facility_uuid:
             payload["provider_id"] = str(health_facility_uuid)
+        payload["facility"] = {
+            "level": getattr(claim.health_facility, "level", None) or None,
+            "care_type": getattr(claim.health_facility, "care_type", None) or None,
+        }
+        payload["provider_license_valid"] = self._facility_licensed(claim.health_facility)
         return payload
+
+    # openIMIS has no licence field; a facility that is inactive or delisted is the closest signal.
+    UNLICENSED_FACILITY_STATUSES = ("IN", "DE")
+    LICENSED_FACILITY_STATUS = "AC"
+
+    @classmethod
+    def _facility_licensed(cls, facility: Any) -> bool | None:
+        """True for an active facility, False for inactive or delisted, None when unknown."""
+        status = getattr(facility, "status", None)
+        if status == cls.LICENSED_FACILITY_STATUS:
+            return True
+        if status in cls.UNLICENSED_FACILITY_STATUSES:
+            return False
+        return None
+
+    @classmethod
+    def _prices(cls, price_asked: Any, tariff: Any) -> dict[str, float]:
+        """Per-unit price asked and reference tariff; keys are omitted when unknown."""
+        out: dict[str, float] = {}
+        if price_asked is not None:
+            out["unit_price"] = cls._to_float(price_asked)
+        if tariff is not None:
+            out["tariff_unit_price"] = cls._to_float(tariff)
+        return out
+
+    def _tariffs(self, claim: Claim) -> tuple[dict[int, Any], dict[int, Any]]:
+        """Reference unit price per item and service id.
+
+        The facility's price-list override wins over the catalogue price, as in openIMIS
+        valuation. Without the ``medical_pricelist`` module only catalogue prices are used.
+        """
+        items = list(claim.items.filter(validity_to__isnull=True).select_related("item"))
+        services = list(claim.services.filter(validity_to__isnull=True).select_related("service"))
+        item_tariffs = {i.item_id: i.item.price for i in items if i.item.price is not None}
+        service_tariffs = {s.service_id: s.service.price for s in services if s.service.price is not None}
+        facility = claim.health_facility
+        try:
+            from medical_pricelist.models import ItemsPricelistDetail, ServicesPricelistDetail
+        except ImportError:
+            return item_tariffs, service_tariffs
+        if getattr(facility, "items_pricelist_id", None) and item_tariffs:
+            rows = ItemsPricelistDetail.objects.filter(
+                items_pricelist_id=facility.items_pricelist_id,
+                item_id__in=list(item_tariffs),
+                validity_to__isnull=True,
+                price_overrule__isnull=False,
+            ).values_list("item_id", "price_overrule")
+            item_tariffs.update(dict(rows))
+        if getattr(facility, "services_pricelist_id", None) and service_tariffs:
+            rows = ServicesPricelistDetail.objects.filter(
+                services_pricelist_id=facility.services_pricelist_id,
+                service_id__in=list(service_tariffs),
+                validity_to__isnull=True,
+                price_overrule__isnull=False,
+            ).values_list("service_id", "price_overrule")
+            service_tariffs.update(dict(rows))
+        return item_tariffs, service_tariffs
 
     @staticmethod
     def _deceased_date(insuree: Any) -> Any:
@@ -131,7 +205,7 @@ class OpenIMISToMirevaMapper:
             )
             .order_by("-date_from")[:limit]
         )
-        return [self.map_claim(history_claim, [], None) for history_claim in claims]
+        return [self.map_claim(history_claim, [], None, with_tariffs=False) for history_claim in claims]
 
     def fetch_provider_history(
         self, hf_id: int, exclude_claim_id: int | None = None

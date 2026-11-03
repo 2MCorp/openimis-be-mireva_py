@@ -45,6 +45,9 @@ class MirevaService:
     # rejections by default; a model-only REJECT goes to a human reviewer instead.
     AUTO_REJECT_HARD_RULES = "hard_rules"
     AUTO_REJECT_ALWAYS = "always"
+    # MIREVA accepts at most 50 prior claims per request.
+    DEFAULT_HISTORY_LIMIT = 10
+    MAX_HISTORY_LIMIT = 50
 
     def __init__(self) -> None:
         """Create SDK client and mapper using Django settings."""
@@ -73,6 +76,18 @@ class MirevaService:
         self.auto_reject = auto_reject
         store_payload = getattr(settings, "MIREVA_STORE_PAYLOAD", None)
         self.store_payload = True if store_payload is None else bool(store_payload)
+        limit = getattr(settings, "MIREVA_PATIENT_HISTORY_LIMIT", None)
+        if limit is None:
+            limit = os.getenv("MIREVA_PATIENT_HISTORY_LIMIT", self.DEFAULT_HISTORY_LIMIT)
+        try:
+            limit = int(limit)
+        except (TypeError, ValueError):
+            raise ValueError(f"MIREVA_PATIENT_HISTORY_LIMIT must be an integer, got {limit!r}.") from None
+        if not 1 <= limit <= self.MAX_HISTORY_LIMIT:
+            raise ValueError(
+                f"MIREVA_PATIENT_HISTORY_LIMIT must be between 1 and {self.MAX_HISTORY_LIMIT}, got {limit}."
+            )
+        self.patient_history_limit = limit
         self.mapper = OpenIMISToMirevaMapper()
 
     def evaluate_claim(self, claim_uuid: str, skip_existing: bool = False) -> MirevaClaimResult:
@@ -95,7 +110,7 @@ class MirevaService:
         patient_history = self.mapper.fetch_patient_history(
             insuree_id=claim.insuree_id,
             exclude_claim_id=claim.id,
-            limit=10,
+            limit=self.patient_history_limit,
         )
         provider_history = self.mapper.fetch_provider_history(
             hf_id=claim.health_facility_id, exclude_claim_id=claim.id
