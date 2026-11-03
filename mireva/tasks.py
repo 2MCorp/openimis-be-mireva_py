@@ -71,3 +71,17 @@ def sweep_unevaluated_claims(limit: int = 100) -> int:
     if queued:
         logger.info("MIREVA sweep queued %s unevaluated CHECKED claims", queued)
     return queued
+
+
+@shared_task(bind=True, max_retries=3, default_retry_delay=300)
+def sync_omop_mappings(self: Any) -> dict[str, int]:
+    """Push this site's codes to MIREVA and pull the organization's OMOP mappings."""
+    from dataclasses import asdict
+
+    from mireva.concept_sync import sync_concepts
+
+    try:
+        return asdict(sync_concepts(MirevaService().client))
+    except MirevaConnectionError as exc:
+        logger.warning("MIREVA concept sync could not connect: %s", exc)
+        raise self.retry(exc=exc)

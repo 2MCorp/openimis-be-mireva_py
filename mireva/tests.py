@@ -764,3 +764,13 @@ class ReviewerNotificationTests(TestCase):
         with self.captureOnCommitCallbacks(execute=True):
             service.evaluate_claim(str(self.claim.uuid))
         self.assertFalse(Notification.objects.filter(source="mireva").exists())
+
+
+class ConceptSyncTests(SimpleTestCase):
+    def test_batches_split_entries_at_the_batch_size(self):
+        from mireva import concept_sync
+
+        entries = ({"vocabulary": "ICD-10", "source_code": str(i)} for i in range(concept_sync.BATCH_SIZE + 1))
+        sizes = [len(b) for b in concept_sync._batches(entries)]
+        self.assertEqual(sizes, [concept_sync.BATCH_SIZE, 1])
+

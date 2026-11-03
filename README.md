@@ -69,6 +69,20 @@ python manage.py mireva_load_omop_mappings unmapped.csv --dry-run
 python manage.py mireva_load_omop_mappings unmapped.csv
 ```
 
+### Org-based mappings and the scheduled sync
+
+The mapping table is owned by the organization in MIREVA (the organization of `MIREVA_API_KEY`);
+`OmopConceptMapping` here is a local copy that the mapper reads. `mireva.tasks.sync_omop_mappings`
+runs every `MIREVA_OMOP_SYNC_INTERVAL_MINUTES` (default 60, `0` disables) when Celery beat is running
+(`make celery-beat`). Each run:
+
+1. **pushes** every active diagnosis, item and service code to MIREVA, where new codes wait unmapped;
+2. **pulls** the codes the organization has mapped (org admin API `PUT /admin/org/{org_id}/concepts`, or
+   `mireva-import-concepts --org <slug> --file mappings.json` on the MIREVA side) into `OmopConceptMapping`.
+
+Run it by hand with `python manage.py mireva_sync_omop_mappings`. Mappings that exist only locally
+(for example from `mireva_load_omop_mappings`) are not touched, but are not shared with MIREVA either.
+
 ICD-10 codes are matched without dots and case-insensitively (`A00.0` equals `A000`).
 Standard concept ids come from OHDSI Athena (https://athena.ohdsi.org); concept ids in the
 local range are rejected by the loader.
