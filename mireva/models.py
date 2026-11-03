@@ -1,6 +1,8 @@
 from django.db import models
 from django.utils.translation import gettext_lazy as _
 
+from mireva.lines import flagged_lines
+
 
 class MirevaClaimResult(models.Model):
     """Stores the MIREVA fraud evaluation result for a single claim."""
@@ -46,6 +48,11 @@ class MirevaClaimResult(models.Model):
     )
     review_note = models.TextField(null=True, blank=True)
     reviewed_at = models.DateTimeField(null=True, blank=True)
+
+    @property
+    def line_flags(self) -> dict[str, list[str]]:
+        """Claim lines named by fired rules, mapped to the rule ids (see ``mireva.lines``)."""
+        return flagged_lines(self.flags)
 
     class Meta:
         db_table = "mireva_claim_result"

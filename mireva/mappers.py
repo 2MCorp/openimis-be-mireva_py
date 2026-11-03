@@ -62,6 +62,7 @@ class OpenIMISToMirevaMapper:
                 "days_supply": 0,
                 **self._prices(item.price_asked, item_tariffs.get(item.item_id)),
                 **flags(item.item),
+                **({"line_id": f"item:{item.id}"} if with_tariffs else {}),
             }
             for item in claim.items.filter(validity_to__isnull=True).select_related("item")
         ]
@@ -71,6 +72,7 @@ class OpenIMISToMirevaMapper:
                 "quantity": self._to_float(service.qty_provided) or 1.0,
                 **self._prices(service.price_asked, service_tariffs.get(service.service_id)),
                 **flags(service.service),
+                **({"line_id": f"service:{service.id}"} if with_tariffs else {}),
             }
             for service in claim.services.filter(validity_to__isnull=True).select_related(
                 "service"

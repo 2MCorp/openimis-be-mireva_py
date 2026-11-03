@@ -150,6 +150,44 @@ class EligibilityTests(SimpleTestCase):
                 self.assertIs(MirevaService().mapper.derive_license, expected)
 
 
+class LineAttributionTests(SimpleTestCase):
+    FLAGS = [
+        {"rule_id": "price_above_tariff", "line_ids": ["item:7", "service:2"]},
+        {"rule_id": "category_ineligible", "line_ids": ["item:7"]},
+        {"rule_id": "claim_frequency"},
+        {"rule_id": "amount_zscore", "line_ids": []},
+        "not-a-dict",
+    ]
+
+    def test_flagged_lines_groups_rules_per_line(self):
+        from mireva.lines import flagged_lines
+
+        self.assertEqual(
+            flagged_lines(self.FLAGS),
+            {"item:7": ["price_above_tariff", "category_ineligible"], "service:2": ["price_above_tariff"]},
+        )
+        self.assertEqual(flagged_lines(None), {})
+        self.assertEqual(flagged_lines([{"rule_id": "old", "detail": "no line_ids key"}]), {})
+
+    def test_description_is_capped(self):
+        from mireva.lines import describe_flagged_lines
+
+        self.assertEqual(
+            describe_flagged_lines(self.FLAGS),
+            "item:7 (price_above_tariff, category_ineligible), service:2 (price_above_tariff)",
+        )
+        many = [{"rule_id": "r", "line_ids": [f"item:{i}"]} for i in range(8)]
+        self.assertTrue(describe_flagged_lines(many, limit=2).endswith("and 6 more"))
+        self.assertEqual(describe_flagged_lines([]), "")
+
+    def test_result_exposes_line_flags(self):
+        self.assertEqual(MirevaClaimResult(flags=self.FLAGS).line_flags["service:2"], ["price_above_tariff"])
+
+    def test_graphql_type_resolves_line_flags(self):
+        result = MirevaClaimResult(flags=self.FLAGS)
+        self.assertEqual(schema.MirevaClaimResultType.resolve_line_flags(result, None)["item:7"][0], "price_above_tariff")
+
+
 class HistoryLimitTests(SimpleTestCase):
     def _limit(self, value):
         with mock.patch("mireva.services.MirevaClient"), override_settings(
@@ -663,6 +701,7 @@ class ReviewerNotificationTests(TestCase):
             "risk_level": "HIGH", "fraud_score": 0.87,
             "reasons": [{"title": "late_submission_proxy", "source": "soft_rule"},
                         {"title": "Model scores", "source": "ai"}],
+            "flags": [{"rule_id": "price_above_tariff", "line_ids": ["item:7"]}],
         }
         first = notify_reviewers(str(self.claim.uuid), self.claim.code, prediction, downgraded=True)
         again = notify_reviewers(str(self.claim.uuid), self.claim.code, prediction, downgraded=True)
@@ -673,6 +712,7 @@ class ReviewerNotificationTests(TestCase):
         self.assertIn("HIGH", row.body)
         self.assertIn("0.87", row.body)
         self.assertIn("late_submission_proxy", row.body)
+        self.assertIn("item:7 (price_above_tariff)", row.body)
         self.assertNotIn("Model scores", row.body)
         self.assertEqual(row.severity, "error")
         self.assertFalse(Notification.objects.filter(recipient=self.other).exists())

@@ -21,10 +21,17 @@ class MirevaClaimResultType(DjangoObjectType):
     """GraphQL type exposing persisted MIREVA evaluation fields for a claim."""
 
     claim_id = graphene.String()
+    line_flags = graphene.JSONString(
+        description="Claim lines named by fired rules: {line_id: [rule_id, ...]}, e.g. item:7 or service:3"
+    )
 
     class Meta:
         model = MirevaClaimResult
         fields = "__all__"
+
+    def resolve_line_flags(self, info: Any) -> dict[str, list[str]]:
+        """Expose which lines caused rule hits, so reviewers can look at them first."""
+        return self.line_flags
 
     def resolve_claim_id(self, info: Any) -> str:
         """Return the claim UUID as a string field."""

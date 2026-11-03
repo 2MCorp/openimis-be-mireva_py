@@ -8,6 +8,8 @@ from typing import Any
 from django.conf import settings
 from django.db import transaction
 
+from mireva.lines import describe_flagged_lines
+
 logger = logging.getLogger(__name__)
 
 MAX_REASONS_IN_BODY = 3
@@ -98,6 +100,9 @@ def notify_reviewers(
         ]
         if reasons:
             lines.append("Signals: {{ reasons }}.")
+        flagged = describe_flagged_lines(prediction.get("flags"))
+        if flagged:
+            lines.append("Check lines: {{ flagged }}.")
         with transaction.atomic():  # savepoint: a failure here leaves the caller's transaction intact
             created = notify(
                 reviewers,
@@ -108,6 +113,7 @@ def notify_reviewers(
                     "risk": risk,
                     "score": f"{float(prediction.get('fraud_score') or 0.0):.2f}",
                     "reasons": ", ".join(str(r) for r in reasons),
+                    "flagged": flagged,
                 },
                 category="claim",
                 severity="error" if risk == "HIGH" else "warning",
