@@ -192,9 +192,11 @@ class MirevaService:
             "hard_rule_ids": [
                 r.get("rule_id") for r in (hard_rules.get("rules_fired") or []) if isinstance(r, dict)
             ],
-            "hard_rejected": bool(
-                hard_rules.get("decision") == "REJECT" or payload.get("skipped_model")
-            ),
+            # skipped_model also marks the rules-only policy, so trust it only when the
+            # response carries no hard-rule block.
+            "hard_rejected": hard_rules.get("decision") == "REJECT"
+            if hard_rules
+            else bool(payload.get("skipped_model")),
         }
 
     def _apply_decision(
