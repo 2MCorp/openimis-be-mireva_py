@@ -116,7 +116,7 @@ class MirevaService:
             limit=self.patient_history_limit,
         )
         provider_history = self.mapper.fetch_provider_history(
-            hf_id=claim.health_facility_id, exclude_claim_id=claim.id
+            hf_id=claim.health_facility_id, exclude_claim_id=claim.id, claim=claim
         )
         mireva_input = self.mapper.map_claim(claim, patient_history, provider_history)
         prediction = self.client.predict(mireva_input)

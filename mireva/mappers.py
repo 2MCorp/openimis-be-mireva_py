@@ -231,20 +231,29 @@ class OpenIMISToMirevaMapper:
         ends = [p.expiry_date for p in policies if p.expiry_date]
         return (min(starts) if starts else None, max(ends) if ends else None)
 
+    COUNTED_STATUSES = (Claim.STATUS_CHECKED, Claim.STATUS_PROCESSED, Claim.STATUS_VALUATED)
+
     def fetch_patient_history(
-        self, insuree_id: int, exclude_claim_id: int, limit: int = 10
+        self,
+        insuree_id: int,
+        exclude_claim_id: int,
+        limit: int = 10,
+        before_claim_id: int | None = None,
     ) -> list[dict[str, Any]]:
-        """Return mapped history claims for the same patient excluding current claim."""
+        """Return mapped history claims for the same patient excluding current claim.
+
+        ``before_claim_id`` limits history to claims created earlier, to re-score a claim as it
+        was seen at the time.
+        """
+        history = Claim.objects.filter(
+            insuree_id=insuree_id,
+            validity_to__isnull=True,
+            status__in=self.COUNTED_STATUSES,
+        )
+        if before_claim_id is not None:
+            history = history.filter(id__lt=before_claim_id)
         claims = (
-            Claim.objects.filter(
-                insuree_id=insuree_id,
-                validity_to__isnull=True,
-                status__in=[
-                    Claim.STATUS_CHECKED,
-                    Claim.STATUS_PROCESSED,
-                    Claim.STATUS_VALUATED,
-                ],
-            )
+            history
             .exclude(id=exclude_claim_id)
             .select_related("insuree", "health_facility")
             .prefetch_related(
@@ -255,7 +264,12 @@ class OpenIMISToMirevaMapper:
         return [self.map_claim(history_claim, [], None, with_tariffs=False) for history_claim in claims]
 
     def fetch_provider_history(
-        self, hf_id: int, exclude_claim_id: int | None = None
+        self,
+        hf_id: int,
+        exclude_claim_id: int | None = None,
+        claim: Claim | None = None,
+        before_claim_id: int | None = None,
+        window_days: int = 30,
     ) -> dict[str, Any]:
         """Aggregate provider-level claim metrics used for model context.
 
@@ -271,6 +285,8 @@ class OpenIMISToMirevaMapper:
         )
         if exclude_claim_id is not None:
             base_queryset = base_queryset.exclude(id=exclude_claim_id)
+        if before_claim_id is not None:
+            base_queryset = base_queryset.filter(id__lt=before_claim_id)
         aggregate_result = base_queryset.aggregate(
             total_claims=Count("id"),
             avg_claim_amount=Avg("claimed"),
@@ -289,12 +305,44 @@ class OpenIMISToMirevaMapper:
             round(rejected_claims / total_claims, 4) if total_claims > 0 else 0.0
         )
 
-        return {
+        history = {
             "facility_concept_id": hf_id,
             "claims_last_30_days": int(aggregate_result["claims_last_30_days"] or 0),
             "avg_claim_amount": float(aggregate_result["avg_claim_amount"] or 0.0),
             "rejection_rate": rejection_rate,
         }
+        if claim is not None:
+            history["service_patient_counts"] = self._service_patient_counts(
+                claim, hf_id, before_claim_id, window_days
+            )
+        return history
+
+    def _service_patient_counts(
+        self, claim: Claim, hf_id: int, before_claim_id: int | None, window_days: int
+    ) -> dict[str, int]:
+        """For each billed line: how many other patients were billed it at this facility recently."""
+        since = timezone.now().date() - timedelta(days=window_days)
+        counts: dict[str, int] = {}
+        for lines, vocabulary, ref, code_attr in (
+            (claim.items.all(), OmopConceptMapping.VOCABULARY_ITEM, "item", "item"),
+            (claim.services.all(), OmopConceptMapping.VOCABULARY_SERVICE, "service", "service"),
+        ):
+            for line in lines:
+                element = getattr(line, ref)
+                if element is None:
+                    continue
+                others = Claim.objects.filter(
+                    health_facility_id=hf_id,
+                    validity_to__isnull=True,
+                    status__in=self.COUNTED_STATUSES,
+                    date_from__gte=since,
+                    **{f"{'items' if ref == 'item' else 'services'}__{code_attr}_id": element.id},
+                ).exclude(id=claim.id).exclude(insuree_id=claim.insuree_id)
+                if before_claim_id is not None:
+                    others = others.filter(id__lt=before_claim_id)
+                concept = str(self.concept_id(vocabulary, element.code))
+                counts[concept] = others.values("insuree_id").distinct().count()
+        return counts
 
     def _icd_to_omop(self, icd_code: str) -> int:
         """Resolve an ICD-10 source code to an OMOP concept id."""
