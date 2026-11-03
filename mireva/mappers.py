@@ -89,7 +89,7 @@ class OpenIMISToMirevaMapper:
             "patient": {
                 "patient_id": str(insuree.uuid),
                 "age": int(self._resolve_callable(insuree.age) or 0),
-                "gender_concept_id": self.GENDER_MAP.get(insuree.gender, 0),
+                "gender_concept_id": self.GENDER_MAP.get(self._gender_code(insuree), 0),
                 "poverty": getattr(getattr(insuree, "family", None), "poverty", None),
             },
             "diagnoses": diagnoses,
@@ -320,6 +320,12 @@ class OpenIMISToMirevaMapper:
         if not code:
             return 0
         return self._mappings(vocabulary).get(code) or self.local_concept_id(vocabulary, code)
+
+    @staticmethod
+    def _gender_code(insuree: Any) -> str | None:
+        """The insuree's gender code; ``insuree.gender`` is a Gender row, ``gender_id`` its code."""
+        gender = getattr(insuree, "gender", None)
+        return getattr(gender, "code", gender)
 
     @staticmethod
     def normalize_code(vocabulary: str, source_code: Any) -> str:

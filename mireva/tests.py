@@ -774,3 +774,11 @@ class ConceptSyncTests(SimpleTestCase):
         sizes = [len(b) for b in concept_sync._batches(entries)]
         self.assertEqual(sizes, [concept_sync.BATCH_SIZE, 1])
 
+
+class GenderMappingTests(SimpleTestCase):
+    def test_gender_code_reads_related_gender_row_or_plain_code(self):
+        f = OpenIMISToMirevaMapper._gender_code
+        self.assertEqual(f(SimpleNamespace(gender=SimpleNamespace(code="M"))), "M")
+        self.assertEqual(f(SimpleNamespace(gender="F")), "F")
+        self.assertIsNone(f(SimpleNamespace(gender=None)))
+        self.assertEqual(OpenIMISToMirevaMapper.GENDER_MAP.get(f(SimpleNamespace(gender=SimpleNamespace(code="M")))), 8507)
