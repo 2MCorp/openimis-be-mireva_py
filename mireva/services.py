@@ -88,7 +88,10 @@ class MirevaService:
                 f"MIREVA_PATIENT_HISTORY_LIMIT must be between 1 and {self.MAX_HISTORY_LIMIT}, got {limit}."
             )
         self.patient_history_limit = limit
-        self.mapper = OpenIMISToMirevaMapper()
+        derive_license = getattr(settings, "MIREVA_DERIVE_LICENSE_FROM_FACILITY_STATUS", None)
+        if derive_license is None:
+            derive_license = os.getenv("MIREVA_DERIVE_LICENSE_FROM_FACILITY_STATUS", "").lower() in ("1", "true", "yes")
+        self.mapper = OpenIMISToMirevaMapper(derive_license=bool(derive_license))
 
     def evaluate_claim(self, claim_uuid: str, skip_existing: bool = False) -> MirevaClaimResult:
         """Evaluate a claim with MIREVA and apply resulting workflow actions.

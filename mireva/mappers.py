@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import zlib
 from datetime import timedelta
 from typing import Any
@@ -15,6 +16,9 @@ from insuree.models import InsureeStatus
 from mireva.models import MirevaClaimResult, OmopConceptMapping
 
 
+logger = logging.getLogger(__name__)
+
+
 class OpenIMISToMirevaMapper:
     """Converts openIMIS claim data and aggregates into MIREVA inputs."""
 
@@ -24,8 +28,9 @@ class OpenIMISToMirevaMapper:
     VISIT_TYPE_LABELS = {"O": "outpatient", "I": "inpatient", "E": "emergency"}
     GENDER_MAP = {"M": 8507, "F": 8532}
 
-    def __init__(self) -> None:
+    def __init__(self, derive_license: bool = False) -> None:
         self._mapping_cache: dict[str, dict[str, int]] = {}
+        self.derive_license = derive_license
 
     def map_claim(
         self,
@@ -41,6 +46,7 @@ class OpenIMISToMirevaMapper:
         """
         insuree = claim.insuree
         item_tariffs, service_tariffs = self._tariffs(claim) if with_tariffs else ({}, {})
+        flags = self._eligibility_checker(claim) if with_tariffs else (lambda detail: {})
         diagnoses = [
             {
                 "concept_id": self._icd_to_omop(self._diagnosis_to_code(code)),
@@ -55,6 +61,7 @@ class OpenIMISToMirevaMapper:
                 "quantity": self._to_float(item.qty_provided),
                 "days_supply": 0,
                 **self._prices(item.price_asked, item_tariffs.get(item.item_id)),
+                **flags(item.item),
             }
             for item in claim.items.filter(validity_to__isnull=True).select_related("item")
         ]
@@ -63,6 +70,7 @@ class OpenIMISToMirevaMapper:
                 "concept_id": self._service_to_omop(service.service.code),
                 "quantity": self._to_float(service.qty_provided) or 1.0,
                 **self._prices(service.price_asked, service_tariffs.get(service.service_id)),
+                **flags(service.service),
             }
             for service in claim.services.filter(validity_to__isnull=True).select_related(
                 "service"
@@ -105,8 +113,45 @@ class OpenIMISToMirevaMapper:
             "level": getattr(claim.health_facility, "level", None) or None,
             "care_type": getattr(claim.health_facility, "care_type", None) or None,
         }
-        payload["provider_license_valid"] = self._facility_licensed(claim.health_facility)
+        if self.derive_license:
+            payload["provider_license_valid"] = self._facility_licensed(claim.health_facility)
         return payload
+
+    def _eligibility_checker(self, claim: Claim):
+        """Return ``f(item_or_service) -> flags`` using openIMIS's own category and care-type rules.
+
+        ``category_eligible`` is False when the item/service is limited to categories the insuree
+        does not belong to; ``care_type_compatible`` is False when its care type does not fit the
+        facility (mirrors ``claim.validations.validate_claimdetail_care_type``, without its side
+        effect of setting a rejection reason). A flag is omitted when it cannot be determined.
+        """
+        try:
+            from claim.utils import get_claim_target_date
+            from core.utils import patient_category_mask
+
+            target_date = get_claim_target_date(claim)
+            mask = patient_category_mask(claim.insuree, target_date)
+        except Exception:  # noqa: BLE001 - never block an evaluation on an optional signal
+            logger.warning("Could not derive eligibility context for claim %s", claim.uuid, exc_info=True)
+            return lambda detail: {}
+        facility_type = getattr(claim.health_facility, "care_type", None) or "B"
+        inpatient = target_date != claim.date_from
+
+        def flags(detail: Any) -> dict[str, bool]:
+            out: dict[str, bool] = {}
+            category = getattr(detail, "patient_category", None)
+            if category is not None:
+                out["category_eligible"] = category == 0 or (category & mask) == mask
+            care_type = getattr(detail, "care_type", None)
+            if care_type:
+                out["care_type_compatible"] = not (
+                    (facility_type == "O" and inpatient)
+                    or (facility_type == "O" and care_type == "I")
+                    or (facility_type == "I" and care_type == "O")
+                )
+            return out
+
+        return flags
 
     # openIMIS has no licence field; a facility that is inactive or delisted is the closest signal.
     UNLICENSED_FACILITY_STATUSES = ("IN", "DE")

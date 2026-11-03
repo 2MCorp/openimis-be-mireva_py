@@ -105,6 +105,51 @@ class MapperContextTests(SimpleTestCase):
         fake.ServicesPricelistDetail.objects.filter.assert_not_called()
 
 
+class EligibilityTests(SimpleTestCase):
+    def _flags(self, facility_care_type, mask, target, date_from, detail):
+        claim = SimpleNamespace(
+            uuid="u", insuree=object(), date_from=date_from,
+            health_facility=SimpleNamespace(care_type=facility_care_type),
+        )
+        with mock.patch.dict(
+            "sys.modules",
+            {
+                "claim.utils": mock.MagicMock(get_claim_target_date=lambda c: target),
+                "core.utils": mock.MagicMock(patient_category_mask=lambda i, d: mask),
+            },
+        ):
+            return OpenIMISToMirevaMapper()._eligibility_checker(claim)(detail)
+
+    def test_category_mask_semantics(self):
+        d = date(2025, 1, 1)
+        item = lambda cat: SimpleNamespace(patient_category=cat, care_type=None)  # noqa: E731
+        self.assertEqual(self._flags("B", 0b0101, d, d, item(0)), {"category_eligible": True})
+        self.assertEqual(self._flags("B", 0b0101, d, d, item(0b0111)), {"category_eligible": True})
+        self.assertEqual(self._flags("B", 0b0101, d, d, item(0b0100)), {"category_eligible": False})
+
+    def test_care_type_rules_match_openimis(self):
+        d, later = date(2025, 1, 1), date(2025, 1, 5)
+        det = lambda ct: SimpleNamespace(patient_category=None, care_type=ct)  # noqa: E731
+        self.assertEqual(self._flags("O", 0, d, d, det("I")), {"care_type_compatible": False})
+        self.assertEqual(self._flags("I", 0, d, d, det("O")), {"care_type_compatible": False})
+        self.assertEqual(self._flags("O", 0, later, d, det("O")), {"care_type_compatible": False})
+        self.assertEqual(self._flags("B", 0, later, d, det("I")), {"care_type_compatible": True})
+        self.assertEqual(self._flags(None, 0, d, d, det("O")), {"care_type_compatible": True})
+
+    def test_failure_to_derive_context_sends_nothing(self):
+        claim = SimpleNamespace(uuid="u")
+        broken = mock.MagicMock(get_claim_target_date=mock.Mock(side_effect=RuntimeError("no dates")))
+        with mock.patch.dict("sys.modules", {"claim.utils": broken, "core.utils": mock.MagicMock()}):
+            self.assertEqual(OpenIMISToMirevaMapper()._eligibility_checker(claim)(object()), {})
+
+    def test_license_is_opt_in(self):
+        for flag, expected in ((None, False), (True, True)):
+            with mock.patch("mireva.services.MirevaClient"), override_settings(
+                MIREVA_URL="http://m", MIREVA_API_KEY="k", MIREVA_DERIVE_LICENSE_FROM_FACILITY_STATUS=flag
+            ):
+                self.assertIs(MirevaService().mapper.derive_license, expected)
+
+
 class HistoryLimitTests(SimpleTestCase):
     def _limit(self, value):
         with mock.patch("mireva.services.MirevaClient"), override_settings(

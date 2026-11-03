@@ -22,6 +22,7 @@ MIREVA_REVIEWER_RIGHTS = [111010]  # optional; rights whose holders are notified
 MIREVA_SCOPE_REVIEWERS_BY_DISTRICT = False  # optional; True limits reviewers to their assigned districts
 MIREVA_STORE_PAYLOAD = True  # default; set False to keep only a hash of each request
 MIREVA_PATIENT_HISTORY_LIMIT = 10  # optional, 1-50; prior claims sent per request (volume rules only see these)
+MIREVA_DERIVE_LICENSE_FROM_FACILITY_STATUS = False  # optional; True sends provider_license_valid (see below)
 MIREVA_AUTO_REJECT = "hard_rules"  # default; "always" also auto-rejects model-only REJECTs
 ```
 
@@ -43,10 +44,13 @@ Beyond codes and amounts, each payload carries what MIREVA's tariff, volume and 
   facility's price-list override (`medical_pricelist`) when there is one, else the catalogue price. History claims
   are sent without tariffs.
 - `facility.level` and `facility.care_type` from the health facility, and `patient.poverty` from the insuree's family.
-- `provider_license_valid`: openIMIS has no licence field, so this is derived from facility status (`AC` true,
-  `IN` or `DE` false, otherwise omitted). A hard rule on it (enabled in MIREVA's extended registry) rejects claims
-  from inactive or delisted facilities, so check that matches your policy before enabling it.
-- Not sent: allergies (openIMIS has no source for them) and item/patient category.
+- Per line, `category_eligible` and `care_type_compatible`, computed with openIMIS's own patient-category mask
+  and care-type rule, so MIREVA does not need to know openIMIS's bitmask semantics. Omitted when undeterminable.
+- `provider_license_valid` is **off by default**. openIMIS has no licence field; with
+  `MIREVA_DERIVE_LICENSE_FROM_FACILITY_STATUS = True` it is derived from facility status (`AC` true, `IN` or `DE`
+  false, otherwise omitted). MIREVA's `provider_license` hard rule (on in the extended registry) then rejects claims
+  from inactive or delisted facilities, so enable this only if that matches your policy.
+- Not sent: allergies. openIMIS has no allergy data; if you hold it elsewhere, extend `map_claim`.
 
 ## OMOP code mapping
 
