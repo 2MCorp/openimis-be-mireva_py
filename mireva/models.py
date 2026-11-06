@@ -69,11 +69,13 @@ class MirevaEvaluation(models.Model):
     ACTION_REVIEW_SELECTED = "REVIEW_SELECTED"
     ACTION_REVIEW_DOWNGRADED = "REVIEW_DOWNGRADED"
     ACTION_REJECTED = "REJECTED"
+    ACTION_SHADOW = "SHADOW"
     ACTION_CHOICES = (
         (ACTION_APPROVED, _("Claim approved")),
         (ACTION_REVIEW_SELECTED, _("Claim selected for review")),
         (ACTION_REVIEW_DOWNGRADED, _("Model rejection sent to review")),
         (ACTION_REJECTED, _("Claim rejected")),
+        (ACTION_SHADOW, _("Shadow mode: claim left untouched")),
     )
 
     claim = models.ForeignKey(

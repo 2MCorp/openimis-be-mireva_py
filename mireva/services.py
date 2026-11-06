@@ -74,6 +74,10 @@ class MirevaService:
                 f"'{self.AUTO_REJECT_ALWAYS}', got '{auto_reject}'."
             )
         self.auto_reject = auto_reject
+        shadow = getattr(settings, "MIREVA_SHADOW_MODE", None)
+        if shadow is None:
+            shadow = os.getenv("MIREVA_SHADOW_MODE", "").lower() in ("1", "true", "yes")
+        self.shadow_mode = bool(shadow)
         store_payload = getattr(settings, "MIREVA_STORE_PAYLOAD", None)
         self.store_payload = True if store_payload is None else bool(store_payload)
         limit = getattr(settings, "MIREVA_PATIENT_HISTORY_LIMIT", None)
@@ -202,7 +206,13 @@ class MirevaService:
     def _apply_decision(
         self, claim: Claim, decision: str, summary: str, prediction: dict[str, Any]
     ) -> str:
-        """Update claim workflow fields from the decision and return the action taken."""
+        """Update claim workflow fields from the decision and return the action taken.
+
+        In shadow mode the decision is only recorded: the claim, its review selection and the
+        reviewers' notifications are left exactly as the payer's own process made them.
+        """
+        if self.shadow_mode:
+            return MirevaEvaluation.ACTION_SHADOW
         if decision == MirevaClaimResult.DECISION_APPROVE:
             claim.status = Claim.STATUS_PROCESSED
             claim.save(update_fields=["status"])

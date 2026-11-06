@@ -782,3 +782,32 @@ class GenderMappingTests(SimpleTestCase):
         self.assertEqual(f(SimpleNamespace(gender="F")), "F")
         self.assertIsNone(f(SimpleNamespace(gender=None)))
         self.assertEqual(OpenIMISToMirevaMapper.GENDER_MAP.get(f(SimpleNamespace(gender=SimpleNamespace(code="M")))), 8507)
+
+
+class ShadowModeTests(SimpleTestCase):
+    class _Claim:
+        status = 4
+
+        def save(self, *args, **kwargs):
+            raise AssertionError("shadow mode must not touch the claim")
+
+    def test_shadow_mode_records_without_touching_the_claim(self):
+        from mireva.models import MirevaEvaluation
+        from mireva.services import MirevaService
+
+        service = MirevaService.__new__(MirevaService)
+        service.shadow_mode = True
+        for decision in ("APPROVE", "REVIEW", "REJECT"):
+            action = service._apply_decision(self._Claim(), decision, "", {"hard_rejected": True})
+            self.assertEqual(action, MirevaEvaluation.ACTION_SHADOW)
+
+    def test_payer_outcomes_become_labels(self):
+        from claim.models import Claim
+        from mireva.shadow import confusion, outcome_label
+
+        self.assertEqual(outcome_label(Claim.STATUS_PROCESSED), 0)
+        self.assertEqual(outcome_label(Claim.STATUS_VALUATED), 0)
+        self.assertEqual(outcome_label(Claim.STATUS_REJECTED), 2)
+        self.assertIsNone(outcome_label(Claim.STATUS_CHECKED))
+        matrix = confusion([("REVIEW", 0), ("REVIEW", 2), ("APPROVE", 0)])
+        self.assertEqual(matrix["REVIEW"], {0: 1, 2: 1})

@@ -24,6 +24,7 @@ MIREVA_STORE_PAYLOAD = True  # default; set False to keep only a hash of each re
 MIREVA_PATIENT_HISTORY_LIMIT = 10  # optional, 1-50; prior claims sent per request (volume rules only see these)
 MIREVA_DERIVE_LICENSE_FROM_FACILITY_STATUS = False  # optional; True sends provider_license_valid (see below)
 MIREVA_AUTO_REJECT = "hard_rules"  # default; "always" also auto-rejects model-only REJECTs
+MIREVA_SHADOW_MODE = False  # True: score and record claims but never change them (see Shadow mode)
 ```
 
 ## Async flow
@@ -99,6 +100,23 @@ local range are rejected by the loader.
 - **Rejection reasons:** hard-rule rejections use openIMIS reason codes: visit outside the policy
   window is `21` (no coverage); amount, deceased patient, duplicate and gender/diagnosis rules are
   `20` (invalid claim). Anything else is `20`. `Claim.explanation` lists the rule details.
+
+## Shadow mode
+
+With `MIREVA_SHADOW_MODE = True` (or env `MIREVA_SHADOW_MODE=true`) every CHECKED claim is still scored and
+stored (`MirevaClaimResult`, `MirevaEvaluation` with action `SHADOW`), but the claim, its review selection and the
+reviewers' notifications are left exactly as the payer's own process made them. Use it to validate MIREVA on a
+payer's live claims before it acts, and to collect labels without any reviewer workflow change.
+
+```bash
+# how often MIREVA agrees with the payer's final decision, per model version
+python manage.py mireva_export_training_data --shadow
+# also write the labelled claims (payer processed/valuated = 0, rejected = 2) as JSONL
+python manage.py mireva_export_training_data --shadow --output shadow_labels.jsonl
+```
+
+Only claims the payer has already decided are used; open claims are skipped. The label is the payer's decision,
+which is a proxy for fraud, not proof of it.
 
 ## Audit trail, recovery and feedback
 
